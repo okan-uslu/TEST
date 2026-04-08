@@ -1,122 +1,79 @@
-using Microsoft.Data.SqlClient;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Infrastructure;
-using Microsoft.EntityFrameworkCore.Migrations;
-using Microsoft.Extensions.DependencyInjection;
+using Microsoft.SqlServer.Dac;
+using Microsoft.SqlServer.Dac.Compare;
 
 class Program
 {
-    static string masterConn =
-        "Server=(localdb)\\MSSQLLocalDB;Database=master;Trusted_Connection=True;";
-
-    static string tempDb = "EfTempDb";
-
-    static string tempConn =>
-        $"Server=(localdb)\\MSSQLLocalDB;Database={tempDb};Trusted_Connection=True;";
-
-    static void Main(string[] args)
+    static int Main(string[] args)
     {
-        var legacySqlFile = args[0];
-        var currentConn = args[1];
-        var outputDir = args[2];
+        if (args.Length != 3)
+        {
+            Console.WriteLine("Usage:");
+            Console.WriteLine("  tool.exe <source.dacpac> <target-connection-string> <output.sql>");
+            return 1;
+        }
 
-        CreateDb();
-        ExecuteSql(File.ReadAllText(legacySqlFile));
+        var sourceDacpac = args[0];
+        var connectionString = args[1];
+        var outputFile = args[2];
 
-        using var legacyCtx = new LegacyDbContext(tempConn);
-        using var currentCtx = new CurrentDbContext(currentConn);
+        try
+        {
+            // --------------------------------------------------
+            // 1. Define source & target
+            // --------------------------------------------------
+            var source = new SchemaCompareDacpacEndpoint(sourceDacpac);
+            var target = new SchemaCompareDatabaseEndpoint(connectionString);
 
-        var legacyModel = legacyCtx.GetService<IDesignTimeModel>().Model;
-        var currentModel = currentCtx.GetService<IDesignTimeModel>().Model;
+            // --------------------------------------------------
+            // 2. Configure comparison options (industry defaults)
+            // --------------------------------------------------
+            var options = new SchemaCompareOptions
+            {
+                IgnoreWhitespace = true,
+                IgnoreComments = true,
+                IgnorePermissions = true,
+                IgnoreUserSettingsObjects = true,
+                IgnoreRoleMembership = true,
 
-        var services = new ServiceCollection()
-            .AddEntityFrameworkSqlServer()
-            .BuildServiceProvider();
+                DropObjectsNotInSource = true,
+                BlockOnPossibleDataLoss = false
+            };
 
-        var differ = services.GetRequiredService<IMigrationsModelDiffer>();
+            var comparison = new SchemaCompare(source, target)
+            {
+                Options = options
+            };
 
-        var operations = differ.GetDifferences(
-            legacyModel.GetRelationalModel(),
-            currentModel.GetRelationalModel()
-        );
+            // --------------------------------------------------
+            // 3. Run comparison
+            // --------------------------------------------------
+            var result = comparison.Compare();
 
-        var scaffolder = services.GetRequiredService<IMigrationsScaffolder>();
+            if (!result.IsValid)
+            {
+                Console.WriteLine("Comparison failed.");
+                foreach (var err in result.Errors)
+                    Console.WriteLine(err.Message);
 
-        var migration = scaffolder.ScaffoldMigration(
-            name: "SchemaDiff",
-            rootNamespace: "Migrations",
-            subNamespace: "",
-            language: "C#",
-            activeProvider: "Microsoft.EntityFrameworkCore.SqlServer",
-            operations: operations,
-            targetModel: currentModel,
-            lastModel: legacyModel
-        );
+                return 2;
+            }
 
-        Directory.CreateDirectory(outputDir);
+            // --------------------------------------------------
+            // 4. Generate SQL diff script
+            // --------------------------------------------------
+            var script = result.GenerateScript();
 
-        File.WriteAllText(
-            Path.Combine(outputDir, migration.MigrationId + ".cs"),
-            migration.MigrationCode);
+            File.WriteAllText(outputFile, script);
 
-        File.WriteAllText(
-            Path.Combine(outputDir, migration.MigrationId + ".Designer.cs"),
-            migration.MetadataCode);
+            Console.WriteLine($"Diff generated successfully → {outputFile}");
 
-        DropDb();
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("ERROR:");
+            Console.WriteLine(ex.Message);
+            return 99;
+        }
     }
-
-    static void CreateDb()
-    {
-        using var conn = new SqlConnection(masterConn);
-        conn.Open();
-
-        new SqlCommand($"IF DB_ID('{tempDb}') IS NOT NULL DROP DATABASE {tempDb}", conn)
-            .ExecuteNonQuery();
-
-        new SqlCommand($"CREATE DATABASE {tempDb}", conn)
-            .ExecuteNonQuery();
-    }
-
-    static void ExecuteSql(string sql)
-    {
-        using var conn = new SqlConnection(tempConn);
-        conn.Open();
-
-        using var cmd = conn.CreateCommand();
-        cmd.CommandTimeout = 0;
-        cmd.CommandText = sql;
-        cmd.ExecuteNonQuery();
-    }
-
-    static void DropDb()
-    {
-        using var conn = new SqlConnection(masterConn);
-        conn.Open();
-
-        new SqlCommand(
-            $"ALTER DATABASE {tempDb} SET SINGLE_USER WITH ROLLBACK IMMEDIATE",
-            conn).ExecuteNonQuery();
-
-        new SqlCommand($"DROP DATABASE {tempDb}", conn)
-            .ExecuteNonQuery();
-    }
-}
-
-public class LegacyDbContext : DbContext
-{
-    private readonly string _conn;
-    public LegacyDbContext(string conn) => _conn = conn;
-
-    protected override void OnConfiguring(DbContextOptionsBuilder options)
-        => options.UseSqlServer(_conn);
-}
-
-public class CurrentDbContext : DbContext
-{
-    private readonly string _conn;
-    public CurrentDbContext(string conn) => _conn = conn;
-
-    protected override void OnConfiguring(DbContextOptionsBuilder options)
-        => options.UseSqlServer(_conn);
 }
