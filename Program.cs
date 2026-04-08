@@ -1,169 +1,122 @@
 using Microsoft.Data.SqlClient;
-using System.Diagnostics;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.Extensions.DependencyInjection;
 
 class Program
 {
-    static string targetConnectionString;
-    static string sqlFilePath;
-    static string migrationPath;
-
     static string masterConn =
         "Server=(localdb)\\MSSQLLocalDB;Database=master;Trusted_Connection=True;";
 
-    static string tempDbName = "EfReconcilerTempDb";
+    static string tempDb = "EfTempDb";
 
     static string tempConn =>
-        $"Server=(localdb)\\MSSQLLocalDB;Database={tempDbName};Trusted_Connection=True;";
+        $"Server=(localdb)\\MSSQLLocalDB;Database={tempDb};Trusted_Connection=True;";
 
     static void Main(string[] args)
     {
-        if (args.Length < 3)
-        {
-            Console.WriteLine("""
-Usage:
-  EfSchemaReconciler --target "<conn>" --sql "<file.sql>" --migrations "<folder>"
-""");
-            return;
-        }
+        var legacySqlFile = args[0];
+        var currentConn = args[1];
+        var outputDir = args[2];
 
-        targetConnectionString = GetArg(args, "--target");
-        sqlFilePath = GetArg(args, "--sql");
-        migrationPath = GetArg(args, "--migrations");
+        CreateDb();
+        ExecuteSql(File.ReadAllText(legacySqlFile));
 
-        Console.WriteLine("▶ Creating temp DB...");
-        CreateTempDb();
+        using var legacyCtx = new LegacyDbContext(tempConn);
+        using var currentCtx = new CurrentDbContext(currentConn);
 
-        Console.WriteLine("▶ Applying legacy schema...");
-        ApplyLegacySchema(sqlFilePath);
+        var legacyModel = legacyCtx.GetService<IDesignTimeModel>().Model;
+        var currentModel = currentCtx.GetService<IDesignTimeModel>().Model;
 
-        Console.WriteLine("▶ Scaffolding legacy model...");
-        ScaffoldLegacyModel();
+        var services = new ServiceCollection()
+            .AddEntityFrameworkSqlServer()
+            .BuildServiceProvider();
 
-        Console.WriteLine("▶ Scaffolding current model...");
-        ScaffoldCurrentModel();
+        var differ = services.GetRequiredService<IMigrationsModelDiffer>();
 
-        Console.WriteLine("▶ Generating migration...");
-        GenerateMigration(migrationPath);
+        var operations = differ.GetDifferences(
+            legacyModel.GetRelationalModel(),
+            currentModel.GetRelationalModel()
+        );
 
-        Console.WriteLine("▶ Cleaning up temp DB...");
-        DropTempDb();
+        var scaffolder = services.GetRequiredService<IMigrationsScaffolder>();
 
-        Console.WriteLine("✔ DONE");
+        var migration = scaffolder.ScaffoldMigration(
+            name: "SchemaDiff",
+            rootNamespace: "Migrations",
+            subNamespace: "",
+            language: "C#",
+            activeProvider: "Microsoft.EntityFrameworkCore.SqlServer",
+            operations: operations,
+            targetModel: currentModel,
+            lastModel: legacyModel
+        );
+
+        Directory.CreateDirectory(outputDir);
+
+        File.WriteAllText(
+            Path.Combine(outputDir, migration.MigrationId + ".cs"),
+            migration.MigrationCode);
+
+        File.WriteAllText(
+            Path.Combine(outputDir, migration.MigrationId + ".Designer.cs"),
+            migration.MetadataCode);
+
+        DropDb();
     }
 
-    // ----------------------------
-    // ARG PARSER
-    // ----------------------------
-    static string GetArg(string[] args, string key)
-    {
-        for (int i = 0; i < args.Length; i++)
-        {
-            if (args[i] == key && i + 1 < args.Length)
-                return args[i + 1];
-        }
-
-        throw new Exception($"Missing argument: {key}");
-    }
-
-    // ----------------------------
-    // TEMP DB
-    // ----------------------------
-    static void CreateTempDb()
+    static void CreateDb()
     {
         using var conn = new SqlConnection(masterConn);
         conn.Open();
 
-        new SqlCommand($"IF DB_ID('{tempDbName}') IS NOT NULL DROP DATABASE {tempDbName}", conn)
+        new SqlCommand($"IF DB_ID('{tempDb}') IS NOT NULL DROP DATABASE {tempDb}", conn)
             .ExecuteNonQuery();
 
-        new SqlCommand($"CREATE DATABASE {tempDbName}", conn)
+        new SqlCommand($"CREATE DATABASE {tempDb}", conn)
             .ExecuteNonQuery();
     }
 
-    static void DropTempDb()
+    static void ExecuteSql(string sql)
+    {
+        using var conn = new SqlConnection(tempConn);
+        conn.Open();
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandTimeout = 0;
+        cmd.CommandText = sql;
+        cmd.ExecuteNonQuery();
+    }
+
+    static void DropDb()
     {
         using var conn = new SqlConnection(masterConn);
         conn.Open();
 
         new SqlCommand(
-            $"ALTER DATABASE {tempDbName} SET SINGLE_USER WITH ROLLBACK IMMEDIATE",
+            $"ALTER DATABASE {tempDb} SET SINGLE_USER WITH ROLLBACK IMMEDIATE",
             conn).ExecuteNonQuery();
 
-        new SqlCommand($"DROP DATABASE {tempDbName}", conn)
+        new SqlCommand($"DROP DATABASE {tempDb}", conn)
             .ExecuteNonQuery();
     }
+}
 
-    // ----------------------------
-    // LEGACY SQL EXECUTION
-    // ----------------------------
-    static void ApplyLegacySchema(string path)
-    {
-        var sql = File.ReadAllText(path);
+public class LegacyDbContext : DbContext
+{
+    private readonly string _conn;
+    public LegacyDbContext(string conn) => _conn = conn;
 
-        using var conn = new SqlConnection(tempConn);
-        conn.Open();
+    protected override void OnConfiguring(DbContextOptionsBuilder options)
+        => options.UseSqlServer(_conn);
+}
 
-        var batches = sql.Split("GO", StringSplitOptions.RemoveEmptyEntries);
+public class CurrentDbContext : DbContext
+{
+    private readonly string _conn;
+    public CurrentDbContext(string conn) => _conn = conn;
 
-        foreach (var batch in batches)
-        {
-            if (!string.IsNullOrWhiteSpace(batch))
-                new SqlCommand(batch, conn).ExecuteNonQuery();
-        }
-    }
-
-    // ----------------------------
-    // EF SCAFFOLDING
-    // ----------------------------
-    static void ScaffoldLegacyModel()
-    {
-        Run("dotnet",
-            $"ef dbcontext scaffold \"{tempConn}\" Microsoft.EntityFrameworkCore.SqlServer " +
-            $"--context LegacyDbContext --output-dir Models/Legacy --force");
-    }
-
-    static void ScaffoldCurrentModel()
-    {
-        Run("dotnet",
-            $"ef dbcontext scaffold \"{targetConnectionString}\" Microsoft.EntityFrameworkCore.SqlServer " +
-            $"--context CurrentDbContext --output-dir Models/Current --force");
-    }
-
-    // ----------------------------
-    // MIGRATION OUTPUT PATH
-    // ----------------------------
-    static void GenerateMigration(string outputDir)
-    {
-        Directory.CreateDirectory(outputDir);
-
-        Run("dotnet",
-            $"ef migrations add SchemaReconciliation " +
-            $"--context CurrentDbContext " +
-            $"--output-dir \"{outputDir}\"");
-    }
-
-    // ----------------------------
-    // PROCESS HELPER
-    // ----------------------------
-    static void Run(string file, string args)
-    {
-        var p = new Process
-        {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = file,
-                Arguments = args,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            }
-        };
-
-        p.Start();
-        p.WaitForExit();
-
-        if (p.ExitCode != 0)
-            throw new Exception(p.StandardError.ReadToEnd());
-    }
+    protected override void OnConfiguring(DbContextOptionsBuilder options)
+        => options.UseSqlServer(_conn);
 }
