@@ -1,3 +1,4 @@
+using Microsoft.SqlServer.Dac;
 using Microsoft.SqlServer.Dac.Compare;
 using System.Diagnostics;
 
@@ -18,16 +19,13 @@ class Program
 
         try
         {
-            // --------------------------------------------------
-            // 1. BUILD DACPAC FROM SQL (NEW PART)
-            // --------------------------------------------------
             var dacpacPath = BuildDacpacFromSql(sqlFile);
 
-            // --------------------------------------------------
-            // 2. COMPARE USING DACFX (UNCHANGED BEST PRACTICE)
-            // --------------------------------------------------
-            var source = new SchemaCompareDacpacEndpoint(dacpacPath);
-            var target = new SchemaCompareDatabaseEndpoint(connectionString);
+            // ==================================================
+            // DacFx 170+ Schema Compare (UPDATED API)
+            // ==================================================
+            var source = SchemaCompareEndpointFactory.CreateDacpacEndpoint(dacpacPath);
+            var target = SchemaCompareEndpointFactory.CreateDatabaseEndpoint(connectionString);
 
             var options = new SchemaCompareOptions
             {
@@ -41,23 +39,28 @@ class Program
                 BlockOnPossibleDataLoss = false
             };
 
-            var comparison = new SchemaCompare(source, target)
-            {
-                Options = options
-            };
+            var comparison = new SchemaComparison(source, target, options);
 
             var result = comparison.Compare();
 
-            if (!result.IsValid)
+            if (result == null || result.IsValid == false)
             {
                 Console.WriteLine("Comparison failed:");
-                foreach (var err in result.Errors)
-                    Console.WriteLine(err.Message);
+
+                if (result?.Errors != null)
+                {
+                    foreach (var err in result.Errors)
+                        Console.WriteLine(err.Message);
+                }
 
                 return 2;
             }
 
-            var script = result.GenerateScript();
+            var script = result.GenerateScript(
+                new SchemaCompareScriptOptions
+                {
+                    DeployToDatabase = false
+                });
 
             File.WriteAllText(outputFile, script);
 
@@ -67,13 +70,13 @@ class Program
         catch (Exception ex)
         {
             Console.WriteLine("ERROR:");
-            Console.WriteLine(ex.Message);
+            Console.WriteLine(ex);
             return 99;
         }
     }
 
     // ==================================================
-    // NEW: SQL → DACPAC (INDUSTRY WAY USING SQLPACKAGE)
+    // SQL → DACPAC (unchanged approach)
     // ==================================================
     static string BuildDacpacFromSql(string sqlFilePath)
     {
@@ -101,7 +104,7 @@ class Program
 
         File.WriteAllText(projectFile, projectContent);
 
-        var sqlPackage = "sqlpackage"; // ensure installed or give full path
+        var sqlPackage = "sqlpackage";
 
         var args =
             $"/Action:Build " +
@@ -116,9 +119,6 @@ class Program
         return dacpacPath;
     }
 
-    // ==================================================
-    // PROCESS RUNNER
-    // ==================================================
     static void Run(string file, string args)
     {
         var p = new Process
