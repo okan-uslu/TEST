@@ -1,4 +1,5 @@
 using Microsoft.SqlServer.Dac;
+using System;
 using System.IO;
 using System.Data.SqlClient;
 
@@ -6,33 +7,63 @@ class Program
 {
     static void Main()
     {
+        // ======================
+        // PATHS
+        // ======================
         var baseDir = Directory.GetCurrentDirectory();
 
-        var sourcePath = Path.Combine(baseDir, "inputs", "new.dacpac");
+        var dacpacPath = Path.Combine(baseDir, "inputs", "source.dacpac");
         var outputDir = Path.Combine(baseDir, "outputs");
         var outputPath = Path.Combine(outputDir, "diff.sql");
 
         Directory.CreateDirectory(outputDir);
 
-        // 🔗 Your target DB connection string
-        var connectionString = "Server=.;Database=YourDb;Trusted_Connection=True;";
+        // ======================
+        // LOAD DACPAC
+        // ======================
+        var source = DacPackage.Load(dacpacPath);
 
-        var source = DacPackage.Load(sourcePath);
+        // ======================
+        // TARGET DB CONNECTION
+        // ======================
+        var connectionString =
+            "Server=.;Database=YourDb;Trusted_Connection=True;";
+
+        var builder = new SqlConnectionStringBuilder(connectionString);
+        var databaseName = builder.InitialCatalog;
 
         var dacServices = new DacServices(connectionString);
 
-        // Extract DB name from connection string
-        var builder = new SqlConnectionStringBuilder(connectionString);
-        var dbName = builder.InitialCatalog;
+        // ======================
+        // OPTIONS (clean + safe)
+        // ======================
+        var options = new DacDeployOptions
+        {
+            BlockOnPossibleDataLoss = true,
+            DropObjectsNotInSource = false,
+
+            IgnorePermissions = true,
+            IgnoreUserSettingsObjects = true,
+            IgnoreRoleMembership = true,
+            IgnoreExtendedProperties = true
+        };
+
+        // ======================
+        // GENERATE DIFF SQL
+        // ======================
+        Console.WriteLine("Generating diff script...");
 
         var script = dacServices.GenerateDeployScript(
             source,
-            dbName,
-            new DacDeployOptions()
+            databaseName,
+            options
         );
 
+        // ======================
+        // SAVE OUTPUT
+        // ======================
         File.WriteAllText(outputPath, script);
 
-        System.Console.WriteLine($"Diff script created: {outputPath}");
+        Console.WriteLine($"Done: {outputPath}");
     }
 }
