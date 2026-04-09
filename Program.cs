@@ -1,92 +1,64 @@
 using System;
 using System.IO;
-using Microsoft.SqlServer.Dac.Compare;
+using Microsoft.SqlServer.Dac;
 
-// ----------------------------------------------------
-// ARGUMENTS
-// ----------------------------------------------------
-if (args.Length != 2)
+var currentDir = Directory.GetCurrentDirectory();
+
+var sourcePath = Path.Combine(currentDir, "source.dacpac");
+var targetPath = Path.Combine(currentDir, "target.dacpac");
+
+if (!File.Exists(sourcePath))
 {
-    Console.WriteLine("Usage:");
-    Console.WriteLine("  tool.exe <source.dacpac> <target-connection-string>");
+    Console.WriteLine("source.dacpac not found in current directory.");
     return;
 }
 
-var sourceDacpacPath = args[0];
-var targetConnectionString = args[1];
-
-// ----------------------------------------------------
-// VALIDATION
-// ----------------------------------------------------
-if (!File.Exists(sourceDacpacPath))
+if (!File.Exists(targetPath))
 {
-    Console.WriteLine($"Source DACPAC not found: {sourceDacpacPath}");
+    Console.WriteLine("target.dacpac not found in current directory.");
     return;
 }
 
-if (string.IsNullOrWhiteSpace(targetConnectionString))
-{
-    Console.WriteLine("Target connection string is empty.");
-    return;
-}
-
-// ----------------------------------------------------
-// OUTPUT DIR
-// ----------------------------------------------------
-var outputDir = Path.Combine(Directory.GetCurrentDirectory(), "output");
+var outputDir = Path.Combine(currentDir, "output");
 Directory.CreateDirectory(outputDir);
 
-// ----------------------------------------------------
-// ENDPOINTS
-// ----------------------------------------------------
-Console.WriteLine("Loading source DACPAC...");
+Console.WriteLine("Loading DACPACs...");
 
-var source = new SchemaCompareDacpacEndpoint(sourceDacpacPath);
+var sourcePackage = DacPackage.Load(sourcePath);
+var targetPackage = DacPackage.Load(targetPath);
 
-Console.WriteLine("Connecting to target database...");
-
-var target = new SchemaCompareDatabaseEndpoint(targetConnectionString);
-
-// ----------------------------------------------------
-// OPTIONS
-// ----------------------------------------------------
-var options = new SchemaCompareOptions
+var options = new DacDeployOptions
 {
-    IgnoreWhitespace = true,
-    IgnoreComments = true,
-    IgnoreColumnOrder = true,
-    IgnoreObjectPlacementOnSchema = true
+    BlockOnPossibleDataLoss = false,
+    DropObjectsNotInSource = false,
+    IgnorePermissions = true,
+    IgnoreUserSettingsObjects = true
 };
 
-// ----------------------------------------------------
-// HELPER
-// ----------------------------------------------------
-void Write(string fileName, string content)
-{
-    var path = Path.Combine(outputDir, fileName);
-    File.WriteAllText(path, content ?? string.Empty);
-    Console.WriteLine($"Generated: {path}");
-}
+Console.WriteLine("Generating forward diff (source → target)...");
 
-// ----------------------------------------------------
-// FORWARD DIFF
-// ----------------------------------------------------
-Console.WriteLine("Generating forward diff...");
+var forwardScript = DacServices.GenerateDeployScript(
+    sourcePackage,
+    targetPackage,
+    options
+);
 
-var forward = new SchemaComparison(source, target, options);
-forward.Compare();
+File.WriteAllText(
+    Path.Combine(outputDir, "forward.diff.sql"),
+    forwardScript
+);
 
-Write("forward.diff.sql", forward.GenerateScript());
+Console.WriteLine("Generating backward diff (target → source)...");
 
-// ----------------------------------------------------
-// BACKWARD DIFF
-// ----------------------------------------------------
-Console.WriteLine("Generating backward diff...");
+var backwardScript = DacServices.GenerateDeployScript(
+    targetPackage,
+    sourcePackage,
+    options
+);
 
-var backward = new SchemaComparison(target, source, options);
-backward.Compare();
+File.WriteAllText(
+    Path.Combine(outputDir, "backward.diff.sql"),
+    backwardScript
+);
 
-Write("backward.diff.sql", backward.GenerateScript());
-
-// ----------------------------------------------------
 Console.WriteLine("Done.");
