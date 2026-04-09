@@ -2,30 +2,15 @@ using System;
 using System.IO;
 using Microsoft.SqlServer.Dac;
 
-var currentDir = Directory.GetCurrentDirectory();
+var sourceConnection = "Server=.;Database=SourceDb;Trusted_Connection=True;TrustServerCertificate=True;";
+var targetConnection = "Server=.;Database=TargetDb;Trusted_Connection=True;TrustServerCertificate=True;";
 
-var sourcePath = Path.Combine(currentDir, "source.dacpac");
-var targetPath = Path.Combine(currentDir, "target.dacpac");
-
-if (!File.Exists(sourcePath))
-{
-    Console.WriteLine("source.dacpac not found in current directory.");
-    return;
-}
-
-if (!File.Exists(targetPath))
-{
-    Console.WriteLine("target.dacpac not found in current directory.");
-    return;
-}
-
-var outputDir = Path.Combine(currentDir, "output");
+var outputDir = Path.Combine(Directory.GetCurrentDirectory(), "output");
 Directory.CreateDirectory(outputDir);
 
-Console.WriteLine("Loading DACPACs...");
+Console.WriteLine("Initializing DAC services...");
 
-var sourcePackage = DacPackage.Load(sourcePath);
-var targetPackage = DacPackage.Load(targetPath);
+var services = new DacServices(sourceConnection);
 
 var options = new DacDeployOptions
 {
@@ -35,11 +20,11 @@ var options = new DacDeployOptions
     IgnoreUserSettingsObjects = true
 };
 
-Console.WriteLine("Generating forward diff (source → target)...");
+Console.WriteLine("Generating forward diff (Source DB → Target DB)...");
 
-var forwardScript = DacServices.GenerateDeployScript(
-    sourcePackage,
-    targetPackage,
+var forwardScript = services.GenerateDeployScript(
+    sourceConnection,
+    targetConnection,
     options
 );
 
@@ -48,11 +33,11 @@ File.WriteAllText(
     forwardScript
 );
 
-Console.WriteLine("Generating backward diff (target → source)...");
+Console.WriteLine("Generating backward diff (Target DB → Source DB)...");
 
-var backwardScript = DacServices.GenerateDeployScript(
-    targetPackage,
-    sourcePackage,
+var backwardScript = services.GenerateDeployScript(
+    targetConnection,
+    sourceConnection,
     options
 );
 
