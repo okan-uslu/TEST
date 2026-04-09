@@ -1,49 +1,38 @@
-using System;
-using System.IO;
 using Microsoft.SqlServer.Dac;
+using System.IO;
+using System.Data.SqlClient;
 
-var sourceConnection = "Server=.;Database=SourceDb;Trusted_Connection=True;TrustServerCertificate=True;";
-var targetConnection = "Server=.;Database=TargetDb;Trusted_Connection=True;TrustServerCertificate=True;";
-
-var outputDir = Path.Combine(Directory.GetCurrentDirectory(), "output");
-Directory.CreateDirectory(outputDir);
-
-Console.WriteLine("Initializing DAC services...");
-
-var services = new DacServices(sourceConnection);
-
-var options = new DacDeployOptions
+class Program
 {
-    BlockOnPossibleDataLoss = false,
-    DropObjectsNotInSource = false,
-    IgnorePermissions = true,
-    IgnoreUserSettingsObjects = true
-};
+    static void Main()
+    {
+        var baseDir = Directory.GetCurrentDirectory();
 
-Console.WriteLine("Generating forward diff (Source DB → Target DB)...");
+        var sourcePath = Path.Combine(baseDir, "inputs", "new.dacpac");
+        var outputDir = Path.Combine(baseDir, "outputs");
+        var outputPath = Path.Combine(outputDir, "diff.sql");
 
-var forwardScript = services.GenerateDeployScript(
-    sourceConnection,
-    targetConnection,
-    options
-);
+        Directory.CreateDirectory(outputDir);
 
-File.WriteAllText(
-    Path.Combine(outputDir, "forward.diff.sql"),
-    forwardScript
-);
+        // 🔗 Your target DB connection string
+        var connectionString = "Server=.;Database=YourDb;Trusted_Connection=True;";
 
-Console.WriteLine("Generating backward diff (Target DB → Source DB)...");
+        var source = DacPackage.Load(sourcePath);
 
-var backwardScript = services.GenerateDeployScript(
-    targetConnection,
-    sourceConnection,
-    options
-);
+        var dacServices = new DacServices(connectionString);
 
-File.WriteAllText(
-    Path.Combine(outputDir, "backward.diff.sql"),
-    backwardScript
-);
+        // Extract DB name from connection string
+        var builder = new SqlConnectionStringBuilder(connectionString);
+        var dbName = builder.InitialCatalog;
 
-Console.WriteLine("Done.");
+        var script = dacServices.GenerateDeployScript(
+            source,
+            dbName,
+            new DacDeployOptions()
+        );
+
+        File.WriteAllText(outputPath, script);
+
+        System.Console.WriteLine($"Diff script created: {outputPath}");
+    }
+}
